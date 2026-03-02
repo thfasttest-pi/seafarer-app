@@ -1,0 +1,377 @@
+# SEAFARER APP — Enterprise Cursor Rules
+Telegram Mini App (TMA) Job Platform for Seafarers
+
+Stack:
+- FastAPI (async)
+- Aiogram 3.x
+- PostgreSQL
+- SQLAlchemy 2.0 (AsyncSession)
+- Alembic
+- Pydantic v2
+- pydantic-settings
+- Next.js 14 (App Router)
+- Tailwind CSS
+- @twa-dev/sdk
+- SWR or TanStack Query
+
+====================================================
+1. SECURITY — ZERO TRUST POLICY
+====================================================
+
+1.1 Telegram initData — Mandatory
+
+- NO endpoint without initData validation (except /health).
+- HMAC-SHA256 using BOT_TOKEN.
+- Validate auth_date: reject if older than INIT_DATA_MAX_AGE_MINUTES.
+- Implement as global FastAPI dependency.
+- Attach validated user to request context.
+- Never log raw initData.
+- Never expose Telegram payload in response.
+
+1.2 Rate Limiting
+
+- Rate limit by Telegram user_id.
+- Protect:
+  - Job search
+  - Job apply
+  - Auth endpoints
+- Use middleware or dependency.
+- Prevent brute-force or scraping behavior.
+
+1.3 Logging Policy
+
+- Structured logging only (JSON in production).
+- Log:
+  - user_id
+  - endpoint
+  - status_code
+  - execution_time
+- DO NOT log:
+  - initData
+  - tokens
+  - raw request bodies
+  - DB credentials
+
+1.4 CORS
+
+- Restrict allowed origins.
+- No wildcard in production.
+
+====================================================
+2. ASYNC-ONLY BACKEND POLICY
+====================================================
+
+- All endpoints: async def
+- All bot handlers: async def
+- All DB access: AsyncSession
+- No blocking calls.
+- No sync SQLAlchemy.
+
+====================================================
+3. PROJECT STRUCTURE
+====================================================
+
+Required layout:
+
+/backend/app/models/
+/backend/app/schemas/
+/backend/app/services/
+/backend/app/api/
+/backend/app/bot/
+/backend/app/core/ (settings, security, rate limit)
+
+Rules:
+
+- Shared models between bot and API.
+- Shared schemas between bot and API.
+- Business logic only in services.
+- Routers and handlers are thin.
+
+====================================================
+4. CONFIGURATION (Pydantic Settings ONLY)
+====================================================
+
+4.1 Backend (Python)
+
+- Use pydantic-settings with BaseSettings.
+- Create a typed Settings class in app/core/settings.py.
+- Single source of truth. No os.getenv() in application code.
+- Load from .env (dotenv). Env file: .env.example as template.
+- Support ENVIRONMENT=development|staging|production.
+- BOT_TOKEN, DATABASE_URL, SECRET_KEY must come from Settings.
+- Optional fields: use default values or Optional[].
+- Validation: use model_validator for cross-field checks.
+
+4.2 Settings class pattern
+
+  from pydantic_settings import BaseSettings
+  class Settings(BaseSettings):
+      model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+      BOT_TOKEN: str
+      DATABASE_URL: str
+      ENVIRONMENT: str = "development"
+      RATE_LIMIT_REQUESTS: int = 100
+      PAGINATION_MAX_LIMIT: int = 50
+      # ...
+
+4.3 Required env vars (backend)
+
+  - BOT_TOKEN
+  - DATABASE_URL
+  - SECRET_KEY
+  - ALLOWED_ORIGINS (when ENABLE_CORS=true)
+
+4.4 Frontend (Next.js)
+
+- Use frontend/.env.local for local overrides.
+- NEXT_PUBLIC_* vars are exposed to client (e.g. NEXT_PUBLIC_API_URL).
+- Template: frontend/.env.example.
+- Never put secrets in NEXT_PUBLIC_*.
+
+====================================================
+5. DATABASE STANDARDS
+====================================================
+
+5.1 SQLAlchemy 2.0 Strict
+
+- select(Model).where(...)
+- await session.execute(...)
+- async with session.begin()
+
+5.2 Base Model Requirements
+
+Every table MUST include:
+
+- id (PK)
+- created_at (timezone aware)
+- updated_at (timezone aware)
+- is_deleted (boolean, default False)
+
+5.3 Soft Delete Policy
+
+- NEVER hard-delete records.
+- Use `is_deleted = True`.
+- All queries must exclude deleted rows unless explicitly requested.
+
+5.4 Indexing Policy
+
+Jobs table must have indexes on:
+
+- rank
+- vessel_type
+- salary
+- joining_date
+- created_at
+
+Use pg_trgm for:
+- title
+- company_name
+- vessel_type
+
+5.5 Migrations
+
+After ANY model change:
+
+1. Generate Alembic migration.
+2. Review diff.
+3. Apply to dev DB.
+4. Mention in commit notes.
+
+====================================================
+6. Pydantic v2 Strict Policy
+====================================================
+
+- No raw ORM return.
+- All responses use response_model.
+- Validation must happen via schemas.
+- Separate:
+  - CreateDTO
+  - UpdateDTO
+  - ResponseDTO
+
+====================================================
+7. MARITIME DOMAIN RULES
+====================================================
+
+Job MUST include:
+
+- rank (canonical)
+- vessel_type
+- dwt or grt
+- engine_type
+- salary
+- contract_months
+
+Recommended:
+
+- joining_date
+- company_id
+- company_name
+- verified_company
+- english_level
+- nationality_restrictions
+- visa_requirements
+- internet_onboard
+
+====================================================
+8. RANK NORMALIZATION
+====================================================
+
+- Normalize input rank before DB filtering.
+- Map aliases:
+  - 2O
+  - 2/O
+  - OOW
+  → second_officer
+
+- Store canonical rank in DB.
+- Fuzzy search only as fallback.
+
+====================================================
+9. SEARCH ENGINEERING
+====================================================
+
+- Always server-side pagination.
+- Max limit per page: use PAGINATION_MAX_LIMIT from config (default 50).
+- Enforce in service/repository layer.
+- Use optimized indexes.
+- No unbounded queries allowed.
+
+====================================================
+10. ROLE-BASED ACCESS CONTROL (RBAC)
+====================================================
+
+Roles:
+
+- seafarer
+- company_admin
+- super_admin
+
+Rules:
+
+- Seafarer:
+  - Can view jobs
+  - Can apply to jobs
+  - Cannot create/edit jobs
+
+- Company_admin:
+  - Can create/edit own jobs
+  - Cannot edit other companies' jobs
+
+- Super_admin:
+  - Full access
+
+Role must be derived from DB user model (not from frontend input).
+
+====================================================
+11. ERROR HANDLING STANDARD
+====================================================
+
+API errors MUST:
+
+- Return consistent format:
+  { "detail": "Human-readable message" }
+
+- Never expose stack traces.
+- Never expose internal implementation.
+
+Frontend MUST:
+
+- Use centralized API error handler.
+- Display readable message.
+- Trigger:
+  WebApp.HapticFeedback.notificationOccurred("error")
+
+====================================================
+12. FRONTEND (TMA STRICT MODE)
+====================================================
+
+12.1 Integration
+
+- Always call WebApp.ready().
+- Use Telegram theme variables.
+- Use WebApp.MainButton for primary action.
+
+12.2 UX
+
+- Use HapticFeedback for:
+  - Apply
+  - Save
+  - Critical confirmation
+- Handle BackButton properly.
+- Sync navigation with Next router.
+
+12.3 Data Layer
+
+- Use SWR or TanStack Query.
+- No manual fetch logic duplication.
+- Centralized API client.
+
+====================================================
+13. PROHIBITIONS
+====================================================
+
+- No .env in git (use .env.example as template only).
+- No jQuery.
+- No legacy JS.
+- No endpoints without initData validation.
+- No os.getenv().
+- No hard deletes.
+- No raw SQL without necessity.
+- No sensitive data in logs.
+- No direct DB exposure.
+- No fat routers or handlers.
+
+====================================================
+14. PERFORMANCE & PRODUCTION READINESS
+====================================================
+
+- Use connection pooling.
+- Use DB indexes for frequent filters.
+- Enforce max pagination size.
+- Log slow queries.
+- Prepare for horizontal scaling (stateless API).
+
+====================================================
+15. GIT & COMMITS
+====================================================
+
+- Never commit .env (only .env.example).
+- Commit message format: conventional (feat, fix, docs, chore).
+- Keep commits atomic and focused.
+- Migrations: always review alembic diff before commit.
+
+====================================================
+16. FILE NAMING
+====================================================
+
+Backend (Python):
+- Modules: snake_case (user_service.py, job_schemas.py).
+- Classes: PascalCase.
+
+Frontend (TypeScript/React):
+- Components: PascalCase (JobCard.tsx).
+- Hooks: camelCase with use prefix (useJobs.ts).
+- Utils/lib: camelCase or kebab-case.
+
+====================================================
+17. EDITOR & FORMATTING
+====================================================
+
+- Follow .editorconfig (Python: 4 spaces, JS/TS: 2 spaces).
+- Python: use ruff or black for formatting.
+- Trim trailing whitespace, insert final newline.
+- Charset: UTF-8. Line endings: LF.
+
+====================================================
+18. INFRA
+====================================================
+
+- Use docker-compose.yml for local PostgreSQL.
+- Use Makefile for common dev commands (make api, make migrate, make migrate-create).
+- .gitignore: .env, __pycache__, node_modules, .next, .mypy_cache, .ruff_cache.
+- See docs/infra.md for full infra reference.
+
+====================================================
+END OF ENTERPRISE RULESET
+====================================================
